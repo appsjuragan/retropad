@@ -1,0 +1,24 @@
+CC = C:\msys64\mingw64\bin\gcc.exe
+RC = C:\msys64\mingw64\bin\windres.exe
+CFLAGS = -municode -DUNICODE -D_UNICODE -Wall -Wextra -O2
+LDFLAGS = -mwindows -s
+LIBS = -luser32 -lgdi32 -lcomdlg32 -lcomctl32 -lshell32
+
+OBJS = retropad.o file_io.o retropad_res.o
+
+all: retropad.exe
+
+retropad.exe: $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LIBS)
+
+retropad.o: retropad.c resource.h file_io.h
+	$(CC) $(CFLAGS) -c retropad.c -o retropad.o
+
+file_io.o: file_io.c file_io.h resource.h
+	$(CC) $(CFLAGS) -c file_io.c -o file_io.o
+
+retropad_res.o: retropad.rc resource.h res/retropad.ico
+	$(RC) -o retropad_res.o retropad.rc
+
+clean:
+	rm -f retropad.exe $(OBJS)

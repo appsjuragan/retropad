@@ -8,9 +8,11 @@ BEGIN
     POPUP "&File"
     BEGIN
         MENUITEM "&New\tCtrl+N",            IDM_FILE_NEW
+        MENUITEM "New &Tab\tCtrl+T",        IDM_FILE_NEW_TAB
         MENUITEM "&Open...\tCtrl+O",        IDM_FILE_OPEN
         MENUITEM "&Save\tCtrl+S",           IDM_FILE_SAVE
         MENUITEM "Save &As...",             IDM_FILE_SAVE_AS
+        MENUITEM "&Close Tab\tCtrl+W",      IDM_FILE_CLOSE_TAB
         MENUITEM SEPARATOR
         MENUITEM "Page Set&up...",          IDM_FILE_PAGE_SETUP
         MENUITEM "&Print...\tCtrl+P",       IDM_FILE_PRINT
@@ -42,6 +44,7 @@ BEGIN
     POPUP "&View"
     BEGIN
         MENUITEM "&Status Bar",             IDM_VIEW_STATUS_BAR, CHECKED
+        MENUITEM "&Line Numbers",           IDM_VIEW_LINE_NUMBERS, CHECKED
     END
     POPUP "&Help"
     BEGIN
@@ -53,8 +56,10 @@ END
 IDC_RETROPAD ACCELERATORS
 BEGIN
     "^N",       IDM_FILE_NEW,       VIRTKEY, CONTROL
+    "^T",       IDM_FILE_NEW_TAB,   VIRTKEY, CONTROL
     "^O",       IDM_FILE_OPEN,      VIRTKEY, CONTROL
     "^S",       IDM_FILE_SAVE,      VIRTKEY, CONTROL
+    "^W",       IDM_FILE_CLOSE_TAB, VIRTKEY, CONTROL
     "^P",       IDM_FILE_PRINT,     VIRTKEY, CONTROL
     "^Z",       IDM_EDIT_UNDO,      VIRTKEY, CONTROL
     "^X",       IDM_EDIT_CUT,       VIRTKEY, CONTROL
