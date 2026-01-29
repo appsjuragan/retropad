@@ -44,7 +44,13 @@ BEGIN
     POPUP "&View"
     BEGIN
         MENUITEM "&Status Bar",             IDM_VIEW_STATUS_BAR, CHECKED
-        MENUITEM "&Line Numbers",           IDM_VIEW_LINE_NUMBERS, CHECKED
+        MENUITEM "&Line Numbers",           IDM_VIEW_LINE_NUMBERS
+        POPUP "&Zoom"
+        BEGIN
+            MENUITEM "Zoom &In\tCtrl+Plus",     IDM_VIEW_ZOOM_IN
+            MENUITEM "Zoom &Out\tCtrl+Minus",   IDM_VIEW_ZOOM_OUT
+            MENUITEM "&Restore Default Zoom\tCtrl+0", IDM_VIEW_ZOOM_RESTORE
+        END
     END
     POPUP "&Help"
     BEGIN
@@ -72,6 +78,11 @@ BEGIN
     "^G",       IDM_EDIT_GOTO,      VIRTKEY, CONTROL
     "^A",       IDM_EDIT_SELECT_ALL,VIRTKEY, CONTROL
     VK_F5,      IDM_EDIT_TIME_DATE, VIRTKEY
+    VK_OEM_PLUS, IDM_VIEW_ZOOM_IN,      VIRTKEY, CONTROL
+    VK_ADD,      IDM_VIEW_ZOOM_IN,      VIRTKEY, CONTROL
+    VK_OEM_MINUS,IDM_VIEW_ZOOM_OUT,     VIRTKEY, CONTROL
+    VK_SUBTRACT, IDM_VIEW_ZOOM_OUT,     VIRTKEY, CONTROL
+    "0",         IDM_VIEW_ZOOM_RESTORE, VIRTKEY, CONTROL
 END
 
 IDD_GOTO DIALOGEX 0, 0, 200, 80

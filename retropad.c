@@ -16,6 +16,12 @@
 #define DEFAULT_HEIGHT 480
 
 #define MAX_TABS 32
+#ifndef EM_SETZOOM
+#define EM_SETZOOM (WM_USER + 225)
+#endif
+#ifndef EM_GETZOOM
+#define EM_GETZOOM (WM_USER + 226)
+#endif
 
 typedef struct TabData {
   HWND hwndEdit;
@@ -30,6 +36,7 @@ typedef struct AppState {
   HWND hwndTab;
   HWND hwndStatus;
   HFONT hFont;
+  LOGFONTW baseFont;
   BOOL wordWrap;
   BOOL statusVisible;
   BOOL statusBeforeWrap;
@@ -46,6 +53,7 @@ typedef struct AppState {
 
   HWND hwndLineNumbers;
   BOOL lineNumbersVisible;
+  int zoomLevel;
 } AppState;
 
 static AppState g_app = {0};
@@ -55,7 +63,8 @@ static UINT g_findMsg = 0;
 static void UpdateTitle(HWND hwnd);
 static void CreateTabControl(HWND hwnd);
 static void AddTab(HWND hwnd, LPCWSTR title, LPCWSTR path);
-static void CloseTab(HWND hwnd, int index);
+static BOOL CloseTab(HWND hwnd, int index);
+static void ShowTabContextMenu(HWND hwnd, int index);
 static void SwitchToTab(HWND hwnd, int index);
 static void CreateEditControlForTab(HWND hwnd, int index);
 static void UpdateLayout(HWND hwnd);
@@ -72,10 +81,11 @@ static void ShowReplaceDialog(HWND hwnd);
 static void ShowTabSelector(HWND hwnd);
 static void ShowLineEndingSelector(HWND hwnd);
 static void ShowEncodingSelector(HWND hwnd);
+static void SetZoom(HWND hwnd, int level);
 static BOOL DoFindNext(BOOL reverse);
 static void DoSelectFont(HWND hwnd);
 static void InsertTimeDate(HWND hwnd);
-static void HandleFindReplace(LPFINDREPLACE lpfr);
+static void HandleFindReplace(LPFINDREPLACEW lpfr);
 static BOOL LoadDocumentFromPath(HWND hwnd, int index, LPCWSTR path);
 static INT_PTR CALLBACK GoToDlgProc(HWND dlg, UINT msg, WPARAM wParam,
                                     LPARAM lParam);
@@ -292,11 +302,35 @@ static void UpdateTitle(HWND hwnd) {
 static void CreateTabControl(HWND hwnd) {
   g_app.hwndTab =
       CreateWindowExW(0, WC_TABCONTROLW, L"",
-                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_HOTTRACK, 0,
-                      0, 0, 0, hwnd, (HMENU)(UINT_PTR)2, g_hInst, NULL);
+                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_HOTTRACK |
+                          TCS_OWNERDRAWFIXED,
+                      0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)2, g_hInst, NULL);
+
+  TabCtrl_SetPadding(g_app.hwndTab, 15, 3);
 
   HFONT hTabFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
   SendMessageW(g_app.hwndTab, WM_SETFONT, (WPARAM)hTabFont, TRUE);
+}
+
+static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                         LPARAM lParam, UINT_PTR uIdSubclass,
+                                         DWORD_PTR dwRefData) {
+  switch (msg) {
+  case WM_MOUSEWHEEL:
+    if (LOWORD(wParam) & MK_CONTROL) {
+      int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+      if (delta > 0)
+        SetZoom(g_app.hwndMain, g_app.zoomLevel + 10);
+      else
+        SetZoom(g_app.hwndMain, g_app.zoomLevel - 10);
+      return 0;
+    }
+    break;
+  case WM_NCDESTROY:
+    RemoveWindowSubclass(hwnd, EditSubclassProc, uIdSubclass);
+    break;
+  }
+  return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 static void CreateEditControlForTab(HWND hwnd, int index) {
@@ -313,6 +347,11 @@ static void CreateEditControlForTab(HWND hwnd, int index) {
     SendMessageW(g_app.tabs[index].hwndEdit, WM_SETFONT, (WPARAM)g_app.hFont,
                  TRUE);
   }
+
+  if (g_app.tabs[index].hwndEdit) {
+    SetWindowSubclass(g_app.tabs[index].hwndEdit, EditSubclassProc, 0, 0);
+  }
+
   SendMessageW(g_app.tabs[index].hwndEdit, EM_SETLIMITTEXT, 0, 0);
 }
 
@@ -358,12 +397,12 @@ static void SwitchToTab(HWND hwnd, int index) {
   UpdateStatusBar(hwnd);
 }
 
-static void CloseTab(HWND hwnd, int index) {
+static BOOL CloseTab(HWND hwnd, int index) {
   if (index < 0 || index >= g_app.tabCount)
-    return;
+    return FALSE;
 
   if (!PromptSaveChanges(hwnd, index))
-    return;
+    return FALSE;
 
   DestroyWindow(g_app.tabs[index].hwndEdit);
   TabCtrl_DeleteItem(g_app.hwndTab, index);
@@ -379,6 +418,39 @@ static void CloseTab(HWND hwnd, int index) {
     int nextIdx = (index >= g_app.tabCount) ? g_app.tabCount - 1 : index;
     g_app.currentTabIdx = -1; // Force switch
     SwitchToTab(hwnd, nextIdx);
+  }
+  return TRUE;
+}
+
+static void ShowTabContextMenu(HWND hwnd, int index) {
+  HMENU hMenu = CreatePopupMenu();
+  AppendMenuW(hMenu, MF_STRING, 55000, L"Close");
+  AppendMenuW(hMenu, MF_STRING, 55001, L"Close Others");
+  AppendMenuW(hMenu, MF_STRING, 55002, L"Close Tabs to the Right");
+
+  POINT pt;
+  GetCursorPos(&pt);
+  int sel = TrackPopupMenu(
+      hMenu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x,
+      pt.y, 0, hwnd, NULL);
+  DestroyMenu(hMenu);
+
+  if (sel == 55000) {
+    CloseTab(hwnd, index);
+  } else if (sel == 55001) {
+    // Close others
+    for (int i = g_app.tabCount - 1; i >= 0; i--) {
+      if (i != index) {
+        if (!CloseTab(hwnd, i))
+          break;
+      }
+    }
+  } else if (sel == 55002) {
+    // Close right
+    for (int i = g_app.tabCount - 1; i > index; i--) {
+      if (!CloseTab(hwnd, i))
+        break;
+    }
   }
 }
 
@@ -414,9 +486,9 @@ static void UpdateLayout(HWND hwnd) {
     parts[0] = 150;
     parts[1] = 300;
     parts[2] = 400;
-    parts[3] = rc.right - 250;
-    parts[4] = rc.right - 120;
-    parts[5] = -1;
+    parts[3] = rc.right - 280; // Zoom
+    parts[4] = rc.right - 120; // Line Ending
+    parts[5] = -1;             // Encoding
     SendMessageW(g_app.hwndStatus, SB_SETPARTS, 6, (LPARAM)parts);
   }
 
@@ -609,7 +681,7 @@ static BOOL LoadDocumentFromPath(HWND hwnd, int index, LPCWSTR path) {
   fileName = fileName ? fileName + 1 : tab->currentPath;
   TCITEMW tie = {0};
   tie.mask = TCIF_TEXT;
-  tie.pszText = fileName;
+  tie.pszText = (LPWSTR)fileName;
   TabCtrl_SetItem(g_app.hwndTab, index, &tie);
 
   UpdateTitle(hwnd);
@@ -649,7 +721,7 @@ static BOOL DoFileSave(HWND hwnd, int index, BOOL saveAs) {
     fileName = fileName ? fileName + 1 : tab->currentPath;
     TCITEMW tie = {0};
     tie.mask = TCIF_TEXT;
-    tie.pszText = fileName;
+    tie.pszText = (LPWSTR)fileName;
     TabCtrl_SetItem(g_app.hwndTab, index, &tie);
   } else {
     StringCchCopyW(path, ARRAYSIZE(path), tab->currentPath);
@@ -763,6 +835,10 @@ static void UpdateStatusBar(HWND hwnd) {
 
   WCHAR buf[128];
 
+  // Part 3: Zoom
+  StringCchPrintfW(buf, ARRAYSIZE(buf), L"%d%%", g_app.zoomLevel);
+  SendMessageW(g_app.hwndStatus, SB_SETTEXT, 3, (LPARAM)buf);
+
   // Part 0: Ln, Col
   StringCchPrintfW(buf, ARRAYSIZE(buf), L"Ln %d, Col %d", line, col);
   SendMessageW(g_app.hwndStatus, SB_SETTEXT, 0, (LPARAM)buf);
@@ -774,9 +850,6 @@ static void UpdateStatusBar(HWND hwnd) {
   // Part 2: Tabs
   StringCchPrintfW(buf, ARRAYSIZE(buf), L"Tabs: %d", g_app.tabCount);
   SendMessageW(g_app.hwndStatus, SB_SETTEXT, 2, (LPARAM)buf);
-
-  // Part 3: Zoom (Hardcoded 100% for now)
-  SendMessageW(g_app.hwndStatus, SB_SETTEXT, 3, (LPARAM)L"100%");
 
   // Part 4: Line Endings
   SendMessageW(g_app.hwndStatus, SB_SETTEXT, 4,
@@ -1009,31 +1082,34 @@ static INT_PTR CALLBACK GoToDlgProc(HWND dlg, UINT msg, WPARAM wParam,
 }
 
 static void DoSelectFont(HWND hwnd) {
-  LOGFONTW lf = {0};
+  CHOOSEFONTW cf = {0};
+  LOGFONTW lf;
+
   if (g_app.hFont) {
     GetObjectW(g_app.hFont, sizeof(LOGFONTW), &lf);
   } else {
-    SystemParametersInfoW(SPI_GETICONTITLELOGFONT, sizeof(LOGFONTW), &lf, 0);
+    GetObjectW(GetStockObject(DEFAULT_GUI_FONT), sizeof(LOGFONTW), &lf);
   }
 
-  CHOOSEFONTW cf = {0};
   cf.lStructSize = sizeof(cf);
   cf.hwndOwner = hwnd;
   cf.lpLogFont = &lf;
   cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT;
 
   if (ChooseFontW(&cf)) {
-    HFONT newFont = CreateFontIndirectW(&lf);
-    if (newFont) {
-      if (g_app.hFont)
-        DeleteObject(g_app.hFont);
-      g_app.hFont = newFont;
-      for (int i = 0; i < g_app.tabCount; i++) {
-        SendMessageW(g_app.tabs[i].hwndEdit, WM_SETFONT, (WPARAM)g_app.hFont,
-                     TRUE);
-      }
-      UpdateLayout(hwnd);
+    if (g_app.hFont)
+      DeleteObject(g_app.hFont);
+
+    // Store base font
+    g_app.baseFont = lf;
+    g_app.zoomLevel = 100; // Reset zoom on font change
+
+    g_app.hFont = CreateFontIndirectW(&lf);
+    for (int i = 0; i < g_app.tabCount; i++) {
+      SendMessageW(g_app.tabs[i].hwndEdit, WM_SETFONT, (WPARAM)g_app.hFont,
+                   TRUE);
     }
+    UpdateStatusBar(hwnd);
   }
 }
 
@@ -1050,7 +1126,7 @@ static void InsertTimeDate(HWND hwnd) {
   SendMessageW(GetCurrentEdit(), EM_REPLACESEL, TRUE, (LPARAM)stamp);
 }
 
-static void HandleFindReplace(LPFINDREPLACE lpfr) {
+static void HandleFindReplace(LPFINDREPLACEW lpfr) {
   if (lpfr->Flags & FR_DIALOGTERM) {
     g_app.hFindDlg = NULL;
     g_app.hReplaceDlg = NULL;
@@ -1153,7 +1229,7 @@ static void HandleCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
       tab->modified = FALSE;
       TCITEMW tie = {0};
       tie.mask = TCIF_TEXT;
-      tie.pszText = UNTITLED_NAME;
+      tie.pszText = (LPWSTR)UNTITLED_NAME;
       TabCtrl_SetItem(g_app.hwndTab, g_app.currentTabIdx, &tie);
       UpdateTitle(hwnd);
       UpdateStatusBar(hwnd);
@@ -1237,6 +1313,15 @@ static void HandleCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
   case IDM_VIEW_LINE_NUMBERS:
     ToggleLineNumbers(hwnd, !g_app.lineNumbersVisible);
     break;
+  case IDM_VIEW_ZOOM_IN:
+    SetZoom(hwnd, g_app.zoomLevel + 10);
+    break;
+  case IDM_VIEW_ZOOM_OUT:
+    SetZoom(hwnd, g_app.zoomLevel - 10);
+    break;
+  case IDM_VIEW_ZOOM_RESTORE:
+    SetZoom(hwnd, 100);
+    break;
 
   case IDM_HELP_VIEW_HELP:
     MessageBoxW(hwnd, L"No help file is available for retropad.", APP_TITLE,
@@ -1267,7 +1352,7 @@ static INT_PTR CALLBACK AboutDlgProc(HWND dlg, UINT msg, WPARAM wParam,
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
                                     LPARAM lParam) {
   if (msg == g_findMsg) {
-    HandleFindReplace((LPFINDREPLACE)lParam);
+    HandleFindReplace((LPFINDREPLACEW)lParam);
     return 0;
   }
 
@@ -1291,11 +1376,57 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     CreateTabControl(hwnd);
     AddTab(hwnd, UNTITLED_NAME, NULL);
     ToggleStatusBar(hwnd, TRUE);
-    ToggleLineNumbers(hwnd, TRUE);
+    ToggleLineNumbers(hwnd, FALSE);
+    g_app.zoomLevel = 100;
     UpdateTitle(hwnd);
     UpdateStatusBar(hwnd);
     DragAcceptFiles(hwnd, TRUE);
     return 0;
+  }
+  case WM_DRAWITEM: {
+    if (wParam == 2) { // Tab control
+      LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lParam;
+      TCITEMW tie = {0};
+      WCHAR text[MAX_PATH_BUFFER];
+      tie.mask = TCIF_TEXT;
+      tie.pszText = (LPWSTR)text;
+      tie.cchTextMax = ARRAYSIZE(text);
+      TabCtrl_GetItem(dis->hwndItem, dis->itemID, &tie);
+
+      // Draw background
+      FillRect(dis->hDC, &dis->rcItem, GetSysColorBrush(COLOR_BTNFACE));
+
+      // Draw text
+      RECT rcText = dis->rcItem;
+      rcText.left += 5;
+      rcText.right -= 20; // Leave room for 'x'
+      DrawTextW(dis->hDC, text, -1, &rcText,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+      // Draw 'x' button
+      RECT rcClose = dis->rcItem;
+      rcClose.left = rcClose.right - 18;
+      rcClose.right -= 4;
+      rcClose.top += 4;
+      rcClose.bottom -= 4;
+
+      if (dis->itemState & ODS_SELECTED) {
+        SetTextColor(dis->hDC, RGB(0, 0, 0));
+      } else {
+        SetTextColor(dis->hDC, RGB(100, 100, 100));
+      }
+
+      DrawTextW(dis->hDC, L"x", -1, &rcClose,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+      // Draw border if selected
+      if (dis->itemState & ODS_SELECTED) {
+        DrawEdge(dis->hDC, &dis->rcItem, EDGE_RAISED, BF_RECT);
+      }
+
+      return TRUE;
+    }
+    break;
   }
   case WM_SETFOCUS:
     if (GetCurrentEdit())
@@ -1340,9 +1471,32 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
   }
   case WM_NOTIFY: {
     LPNMHDR nmhdr = (LPNMHDR)lParam;
-    if (nmhdr->hwndFrom == g_app.hwndTab && nmhdr->code == TCN_SELCHANGE) {
-      int index = TabCtrl_GetCurSel(g_app.hwndTab);
-      SwitchToTab(hwnd, index);
+    if (nmhdr->hwndFrom == g_app.hwndTab) {
+      if (nmhdr->code == TCN_SELCHANGE) {
+        int index = TabCtrl_GetCurSel(g_app.hwndTab);
+        SwitchToTab(hwnd, index);
+      } else if (nmhdr->code == NM_CLICK || nmhdr->code == NM_RCLICK) {
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(g_app.hwndTab, &pt);
+        TCHITTESTINFO hti = {0};
+        hti.pt = pt;
+        int index = TabCtrl_HitTest(g_app.hwndTab, &hti);
+        if (index != -1) {
+          if (nmhdr->code == NM_CLICK) {
+            RECT rcItem;
+            TabCtrl_GetItemRect(g_app.hwndTab, index, &rcItem);
+            RECT rcClose = rcItem;
+            rcClose.left = rcClose.right - 20;
+            if (PtInRect(&rcClose, pt)) {
+              CloseTab(hwnd, index);
+              return 0;
+            }
+          } else {
+            ShowTabContextMenu(hwnd, index);
+          }
+        }
+      }
     } else if (nmhdr->hwndFrom == g_app.hwndStatus && nmhdr->code == NM_CLICK) {
       LPNMMOUSE lpnmm = (LPNMMOUSE)lParam;
       if (lpnmm->dwItemSpec == 2) { // Tabs part
@@ -1368,8 +1522,51 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
   case WM_DESTROY:
     PostQuitMessage(0);
     return 0;
+  case WM_MOUSEWHEEL:
+    if (wParam & MK_CONTROL) {
+      int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+      if (delta > 0)
+        SetZoom(hwnd, g_app.zoomLevel + 10);
+      else
+        SetZoom(hwnd, g_app.zoomLevel - 10);
+      return 0;
+    }
+    break;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void SetZoom(HWND hwnd, int level) {
+  if (level < 10)
+    level = 10;
+  if (level > 500)
+    level = 500;
+  g_app.zoomLevel = level;
+
+  // Recreate font with new size
+  if (g_app.hFont) {
+    DeleteObject(g_app.hFont);
+  }
+
+  LOGFONTW lf = g_app.baseFont;
+  // Calculate new height. lfHeight is usually negative (pixels).
+  // If positive, it's cell height.
+  // We scale it.
+  lf.lfHeight = (LONG)(g_app.baseFont.lfHeight * (double)level / 100.0);
+  // Ensure at least 1 pixel height to avoid errors, though <10% zoom check
+  // handles most.
+  if (lf.lfHeight == 0)
+    lf.lfHeight = (g_app.baseFont.lfHeight > 0) ? 1 : -1;
+
+  g_app.hFont = CreateFontIndirectW(&lf);
+
+  for (int i = 0; i < g_app.tabCount; i++) {
+    SendMessageW(g_app.tabs[i].hwndEdit, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+  }
+  UpdateStatusBar(hwnd);
+  if (g_app.hwndLineNumbers) {
+    InvalidateRect(g_app.hwndLineNumbers, NULL, TRUE);
+  }
 }
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
@@ -1383,6 +1580,12 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   g_app.statusVisible = TRUE;
   g_app.statusBeforeWrap = TRUE;
   g_app.findFlags = FR_DOWN;
+  g_app.zoomLevel = 100;
+
+  // Initialize base font
+  HFONT hDefFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+  GetObjectW(hDefFont, sizeof(LOGFONTW), &g_app.baseFont);
+  g_app.hFont = CreateFontIndirectW(&g_app.baseFont);
 
   WNDCLASSEXW wc = {0};
   wc.cbSize = sizeof(wc);
