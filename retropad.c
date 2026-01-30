@@ -17,6 +17,9 @@
 #define DEFAULT_HEIGHT 480
 
 #define MAX_TABS 32
+#define IDC_TAB 200
+#define IDC_STATUS 201
+#define IDC_LINENUMBERS 202
 #ifndef EM_SETZOOM
 #define EM_SETZOOM (WM_USER + 225)
 #endif
@@ -58,6 +61,7 @@ typedef struct AppState {
 
   BOOL darkMode;
   HBRUSH hEditBrush;
+  WCHAR statusText[6][128];
 } AppState;
 
 static AppState g_app = {0};
@@ -323,11 +327,11 @@ static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
 }
 
 static void CreateTabControl(HWND hwnd) {
-  g_app.hwndTab =
-      CreateWindowExW(0, WC_TABCONTROLW, L"",
-                      WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_HOTTRACK |
-                          TCS_OWNERDRAWFIXED,
-                      0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)2, g_hInst, NULL);
+  g_app.hwndTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
+                                  WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
+                                      TCS_HOTTRACK | TCS_OWNERDRAWFIXED,
+                                  0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)IDC_TAB,
+                                  g_hInst, NULL);
 
   TabCtrl_SetPadding(g_app.hwndTab, 15, 3);
 
@@ -339,6 +343,7 @@ static void CreateTabControl(HWND hwnd) {
 static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
                                          LPARAM lParam, UINT_PTR uIdSubclass,
                                          DWORD_PTR dwRefData) {
+  (void)dwRefData;
   switch (msg) {
   case WM_MOUSEWHEEL:
     if (LOWORD(wParam) & MK_CONTROL) {
@@ -483,7 +488,7 @@ static void ToggleStatusBar(HWND hwnd, BOOL visible) {
   if (visible) {
     if (!g_app.hwndStatus) {
       g_app.hwndStatus =
-          CreateStatusWindowW(WS_CHILD | SBARS_SIZEGRIP, L"", hwnd, 2);
+          CreateStatusWindowW(WS_CHILD | SBARS_SIZEGRIP, L"", hwnd, IDC_STATUS);
     }
     ShowWindow(g_app.hwndStatus, SW_SHOW);
   } else if (g_app.hwndStatus) {
@@ -900,6 +905,16 @@ static LPCWSTR GetLineEndingName(HWND hwndEdit) {
   }
 }
 
+static void SetStatusPart(int part, LPCWSTR text) {
+  if (g_app.darkMode) {
+    StringCchCopyW(g_app.statusText[part], 128, text);
+    SendMessageW(g_app.hwndStatus, SB_SETTEXT, part | SBT_OWNERDRAW,
+                 (LPARAM)g_app.statusText[part]);
+  } else {
+    SendMessageW(g_app.hwndStatus, SB_SETTEXT, part, (LPARAM)text);
+  }
+}
+
 static void UpdateStatusBar(HWND hwnd) {
   (void)hwnd;
   if (!g_app.statusVisible || !g_app.hwndStatus)
@@ -919,28 +934,26 @@ static void UpdateStatusBar(HWND hwnd) {
 
   // Part 3: Zoom
   StringCchPrintfW(buf, ARRAYSIZE(buf), L"%d%%", g_app.zoomLevel);
-  SendMessageW(g_app.hwndStatus, SB_SETTEXT, 3, (LPARAM)buf);
+  SetStatusPart(3, buf);
 
   // Part 0: Ln, Col
   StringCchPrintfW(buf, ARRAYSIZE(buf), L"Ln %d, Col %d", line, col);
-  SendMessageW(g_app.hwndStatus, SB_SETTEXT, 0, (LPARAM)buf);
+  SetStatusPart(0, buf);
 
   // Part 1: Length
   StringCchPrintfW(buf, ARRAYSIZE(buf), L"Length: %d chars", length);
-  SendMessageW(g_app.hwndStatus, SB_SETTEXT, 1, (LPARAM)buf);
+  SetStatusPart(1, buf);
 
   // Part 2: Tabs
   StringCchPrintfW(buf, ARRAYSIZE(buf), L"Tabs: %d", g_app.tabCount);
-  SendMessageW(g_app.hwndStatus, SB_SETTEXT, 2, (LPARAM)buf);
+  SetStatusPart(2, buf);
 
   // Part 4: Line Endings
-  SendMessageW(g_app.hwndStatus, SB_SETTEXT, 4,
-               (LPARAM)GetLineEndingName(hwndEdit));
+  SetStatusPart(4, GetLineEndingName(hwndEdit));
 
   // Part 5: Encoding
   TabData *tab = GetCurrentTab();
-  SendMessageW(g_app.hwndStatus, SB_SETTEXT, 5,
-               (LPARAM)GetEncodingName(tab ? tab->encoding : ENC_UTF8));
+  SetStatusPart(5, GetEncodingName(tab ? tab->encoding : ENC_UTF8));
 }
 
 static void ShowFindDialog(HWND hwnd) {
@@ -1627,9 +1640,9 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     wcln.hCursor = LoadCursorW(NULL, IDC_ARROW);
     RegisterClassExW(&wcln);
 
-    g_app.hwndLineNumbers =
-        CreateWindowExW(0, L"RETROPAD_LINENUMBERS", NULL, WS_CHILD | WS_VISIBLE,
-                        0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)3, g_hInst, NULL);
+    g_app.hwndLineNumbers = CreateWindowExW(
+        0, L"RETROPAD_LINENUMBERS", NULL, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+        hwnd, (HMENU)(UINT_PTR)IDC_LINENUMBERS, g_hInst, NULL);
 
     CreateTabControl(hwnd);
 
@@ -1649,7 +1662,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     return 0;
   }
   case WM_DRAWITEM: {
-    if (wParam == 2) { // Tab control
+    if (wParam == IDC_TAB) { // Tab control
       LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lParam;
       TCITEMW tie = {0};
       WCHAR text[MAX_PATH_BUFFER];
@@ -1699,6 +1712,26 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
         DrawEdge(dis->hDC, &dis->rcItem, EDGE_RAISED, BF_RECT);
       }
 
+      return TRUE;
+    } else if (wParam == IDC_STATUS) {
+      LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lParam;
+      SetBkMode(dis->hDC, TRANSPARENT);
+      if (g_app.darkMode) {
+        SetTextColor(dis->hDC, RGB(255, 255, 255));
+        HBRUSH hBrush = CreateSolidBrush(RGB(30, 30, 30));
+        FillRect(dis->hDC, &dis->rcItem, hBrush);
+        DeleteObject(hBrush);
+      } else {
+        SetTextColor(dis->hDC, GetSysColor(COLOR_BTNTEXT));
+        FillRect(dis->hDC, &dis->rcItem, GetSysColorBrush(COLOR_BTNFACE));
+      }
+      LPCWSTR text = (LPCWSTR)dis->itemData;
+      if (text) {
+        RECT rc = dis->rcItem;
+        rc.left += 4;
+        DrawTextW(dis->hDC, text, -1, &rc,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+      }
       return TRUE;
     }
     break;
