@@ -2,7 +2,7 @@ CC = C:\msys64\mingw64\bin\gcc.exe
 RC = C:\msys64\mingw64\bin\windres.exe
 CFLAGS = -municode -DUNICODE -D_UNICODE -Wall -Wextra -O2
 LDFLAGS = -mwindows -s
-LIBS = -luser32 -lgdi32 -lcomdlg32 -lcomctl32 -lshell32
+LIBS = -luser32 -lgdi32 -lcomdlg32 -lcomctl32 -lshell32 -luxtheme
 
 OBJS = retropad.o file_io.o retropad_res.o
 
