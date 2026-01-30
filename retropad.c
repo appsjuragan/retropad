@@ -7,6 +7,7 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <strsafe.h>
+#include <uxtheme.h>
 #include <windows.h>
 
 #define APP_TITLE L"retropad"
@@ -54,6 +55,9 @@ typedef struct AppState {
   HWND hwndLineNumbers;
   BOOL lineNumbersVisible;
   int zoomLevel;
+
+  BOOL darkMode;
+  HBRUSH hEditBrush;
 } AppState;
 
 static AppState g_app = {0};
@@ -76,6 +80,7 @@ static void SetWordWrap(HWND hwnd, BOOL enabled);
 static void ToggleStatusBar(HWND hwnd, BOOL visible);
 static void UpdateStatusBar(HWND hwnd);
 static void ToggleLineNumbers(HWND hwnd, BOOL visible);
+static void ToggleDarkMode(HWND hwnd, BOOL enabled);
 static void ShowFindDialog(HWND hwnd);
 static void ShowReplaceDialog(HWND hwnd);
 static void ShowTabSelector(HWND hwnd);
@@ -89,6 +94,8 @@ static void HandleFindReplace(LPFINDREPLACEW lpfr);
 static BOOL LoadDocumentFromPath(HWND hwnd, int index, LPCWSTR path);
 static INT_PTR CALLBACK GoToDlgProc(HWND dlg, UINT msg, WPARAM wParam,
                                     LPARAM lParam);
+static BOOL SaveSession();
+static BOOL RestoreSession(HWND hwnd);
 static INT_PTR CALLBACK AboutDlgProc(HWND dlg, UINT msg, WPARAM wParam,
                                      LPARAM lParam);
 
@@ -299,6 +306,22 @@ static void UpdateTitle(HWND hwnd) {
   SetWindowTextW(hwnd, title);
 }
 
+static LRESULT CALLBACK TabSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                        LPARAM lParam, UINT_PTR uIdSubclass,
+                                        DWORD_PTR dwRefData) {
+  (void)uIdSubclass;
+  (void)dwRefData;
+  if (msg == WM_ERASEBKGND && g_app.darkMode) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    if (g_app.hEditBrush) {
+      FillRect((HDC)wParam, &rc, g_app.hEditBrush);
+      return 1;
+    }
+  }
+  return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 static void CreateTabControl(HWND hwnd) {
   g_app.hwndTab =
       CreateWindowExW(0, WC_TABCONTROLW, L"",
@@ -310,6 +333,7 @@ static void CreateTabControl(HWND hwnd) {
 
   HFONT hTabFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
   SendMessageW(g_app.hwndTab, WM_SETFONT, (WPARAM)hTabFont, TRUE);
+  SetWindowSubclass(g_app.hwndTab, TabSubclassProc, 0, 0);
 }
 
 static LRESULT CALLBACK EditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
@@ -483,9 +507,9 @@ static void UpdateLayout(HWND hwnd) {
                statusHeight, TRUE);
 
     int parts[6];
-    parts[0] = 150;
-    parts[1] = 300;
-    parts[2] = 400;
+    parts[0] = 120;
+    parts[1] = 240;
+    parts[2] = 320;
     parts[3] = rc.right - 280; // Zoom
     parts[4] = rc.right - 120; // Line Ending
     parts[5] = -1;             // Encoding
@@ -527,6 +551,52 @@ static void ToggleLineNumbers(HWND hwnd, BOOL visible) {
   }
 }
 
+static void ToggleDarkMode(HWND hwnd, BOOL enabled) {
+  g_app.darkMode = enabled;
+  CheckMenuItem(GetMenu(hwnd), IDM_VIEW_DARK_MODE,
+                MF_BYCOMMAND | (enabled ? MF_CHECKED : MF_UNCHECKED));
+
+  // Clean up old brush if it exists
+  if (g_app.hEditBrush) {
+    DeleteObject(g_app.hEditBrush);
+    g_app.hEditBrush = NULL;
+  }
+
+  // Create new brush for dark mode background
+  if (enabled) {
+    g_app.hEditBrush = CreateSolidBrush(RGB(30, 30, 30));
+    SetWindowTheme(g_app.hwndTab, L"DarkMode_Explorer", NULL);
+    SendMessageW(g_app.hwndStatus, SB_SETBKCOLOR, 0, (LPARAM)RGB(30, 30, 30));
+  } else {
+    SetWindowTheme(g_app.hwndTab, NULL, NULL);
+    SendMessageW(g_app.hwndStatus, SB_SETBKCOLOR, 0, CLR_DEFAULT);
+  }
+
+  // Force redraw of all edit controls
+  for (int i = 0; i < g_app.tabCount; i++) {
+    if (g_app.tabs[i].hwndEdit) {
+      if (enabled)
+        SetWindowTheme(g_app.tabs[i].hwndEdit, L"DarkMode_Explorer", NULL);
+      else
+        SetWindowTheme(g_app.tabs[i].hwndEdit, NULL, NULL);
+      InvalidateRect(g_app.tabs[i].hwndEdit, NULL, TRUE);
+    }
+  }
+
+  // Redraw tab control to update background
+  if (g_app.hwndTab) {
+    InvalidateRect(g_app.hwndTab, NULL, TRUE);
+  }
+
+  // Redraw line numbers if visible
+  if (g_app.hwndLineNumbers) {
+    InvalidateRect(g_app.hwndLineNumbers, NULL, TRUE);
+  }
+
+  // Redraw main window
+  InvalidateRect(hwnd, NULL, TRUE);
+}
+
 static LRESULT CALLBACK LineNumberWndProc(HWND hwnd, UINT msg, WPARAM wParam,
                                           LPARAM lParam) {
   switch (msg) {
@@ -537,13 +607,25 @@ static LRESULT CALLBACK LineNumberWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     if (hwndEdit) {
       RECT rc;
       GetClientRect(hwnd, &rc);
-      FillRect(hdc, &rc, (HBRUSH)(COLOR_BTNFACE + 1));
+
+      // Use dark mode colors if enabled
+      if (g_app.darkMode) {
+        HBRUSH hBrush = CreateSolidBrush(RGB(40, 40, 40));
+        FillRect(hdc, &rc, hBrush);
+        DeleteObject(hBrush);
+      } else {
+        FillRect(hdc, &rc, (HBRUSH)(COLOR_BTNFACE + 1));
+      }
 
       HFONT hOldFont = NULL;
       if (g_app.hFont)
         hOldFont = (HFONT)SelectObject(hdc, g_app.hFont);
 
-      SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT));
+      if (g_app.darkMode) {
+        SetTextColor(hdc, RGB(150, 150, 150));
+      } else {
+        SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT));
+      }
       SetBkMode(hdc, TRANSPARENT);
 
       int firstLine = (int)SendMessageW(hwndEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
@@ -1214,6 +1296,179 @@ static void UpdateMenuStates(HWND hwnd) {
                  MF_BYCOMMAND | (g_app.tabCount > 0 ? MF_ENABLED : MF_GRAYED));
 }
 
+static BOOL GetSessionDirectory(WCHAR *path) {
+  DWORD len = GetTempPathW(MAX_PATH_BUFFER, path);
+  if (len == 0 || len >= MAX_PATH_BUFFER)
+    return FALSE;
+  StringCchCatW(path, MAX_PATH_BUFFER, L"retropad");
+  return TRUE;
+}
+
+static BOOL SaveSession() {
+  WCHAR dir[MAX_PATH_BUFFER];
+  if (!GetSessionDirectory(dir))
+    return FALSE;
+  CreateDirectoryW(dir, NULL);
+
+  WCHAR file[MAX_PATH_BUFFER];
+  StringCchCopyW(file, MAX_PATH_BUFFER, dir);
+  StringCchCatW(file, MAX_PATH_BUFFER, L"\\session.dat");
+
+  HANDLE hFile = CreateFileW(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL, NULL);
+  if (hFile == INVALID_HANDLE_VALUE)
+    return FALSE;
+
+  DWORD written;
+  DWORD magic = 0x52504144; // RPAD
+  WriteFile(hFile, &magic, sizeof(magic), &written, NULL);
+
+  WriteFile(hFile, &g_app.darkMode, sizeof(g_app.darkMode), &written, NULL);
+  WriteFile(hFile, &g_app.wordWrap, sizeof(g_app.wordWrap), &written, NULL);
+  WriteFile(hFile, &g_app.lineNumbersVisible, sizeof(g_app.lineNumbersVisible),
+            &written, NULL);
+  WriteFile(hFile, &g_app.statusVisible, sizeof(g_app.statusVisible), &written,
+            NULL);
+
+  WriteFile(hFile, &g_app.tabCount, sizeof(g_app.tabCount), &written, NULL);
+  WriteFile(hFile, &g_app.currentTabIdx, sizeof(g_app.currentTabIdx), &written,
+            NULL);
+
+  for (int i = 0; i < g_app.tabCount; i++) {
+    TabData *t = &g_app.tabs[i];
+    WriteFile(hFile, t->currentPath, sizeof(t->currentPath), &written, NULL);
+    WriteFile(hFile, &t->modified, sizeof(t->modified), &written, NULL);
+    WriteFile(hFile, &t->encoding, sizeof(t->encoding), &written, NULL);
+    WriteFile(hFile, &t->lineEnding, sizeof(t->lineEnding), &written, NULL);
+
+    int len = GetWindowTextLengthW(t->hwndEdit);
+    WriteFile(hFile, &len, sizeof(len), &written, NULL);
+    if (len > 0) {
+      WCHAR *buf =
+          (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR));
+      if (buf) {
+        GetWindowTextW(t->hwndEdit, buf, len + 1);
+        WriteFile(hFile, buf, len * sizeof(WCHAR), &written, NULL);
+        HeapFree(GetProcessHeap(), 0, buf);
+      } else {
+        // Fallback for alloc failure: write zeros or skip
+        // Writing 0 bytes not possible if len > 0, so file might be corrupt.
+        // But extremely unlikely for small text.
+      }
+    }
+  }
+
+  CloseHandle(hFile);
+  return TRUE;
+}
+
+static BOOL RestoreSession(HWND hwnd) {
+  WCHAR dir[MAX_PATH_BUFFER];
+  if (!GetSessionDirectory(dir))
+    return FALSE;
+
+  WCHAR file[MAX_PATH_BUFFER];
+  StringCchCopyW(file, MAX_PATH_BUFFER, dir);
+  StringCchCatW(file, MAX_PATH_BUFFER, L"\\session.dat");
+
+  HANDLE hFile = CreateFileW(file, GENERIC_READ, FILE_SHARE_READ, NULL,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (hFile == INVALID_HANDLE_VALUE)
+    return FALSE;
+
+  DWORD read;
+  DWORD magic;
+  if (!ReadFile(hFile, &magic, sizeof(magic), &read, NULL) ||
+      magic != 0x52504144) {
+    CloseHandle(hFile);
+    return FALSE;
+  }
+
+  BOOL dm, ww, ln, sv;
+  ReadFile(hFile, &dm, sizeof(dm), &read, NULL);
+  ReadFile(hFile, &ww, sizeof(ww), &read, NULL);
+  ReadFile(hFile, &ln, sizeof(ln), &read, NULL);
+  ReadFile(hFile, &sv, sizeof(sv), &read, NULL);
+
+  if (dm != g_app.darkMode)
+    ToggleDarkMode(hwnd, dm);
+  if (ww != g_app.wordWrap)
+    SetWordWrap(hwnd, ww);
+  if (ln != g_app.lineNumbersVisible)
+    ToggleLineNumbers(hwnd, ln);
+  if (sv != g_app.statusVisible)
+    ToggleStatusBar(hwnd, sv);
+
+  int tabCount, currentIdx;
+  ReadFile(hFile, &tabCount, sizeof(tabCount), &read, NULL);
+  ReadFile(hFile, &currentIdx, sizeof(currentIdx), &read, NULL);
+
+  // Close existing tabs (e.g. init 'Untitled')
+  while (g_app.tabCount > 0)
+    CloseTab(hwnd, 0);
+
+  for (int i = 0; i < tabCount; i++) {
+    WCHAR path[MAX_PATH_BUFFER];
+    ReadFile(hFile, path, sizeof(path), &read, NULL);
+
+    BOOL mod;
+    TextEncoding enc;
+    LineEnding le;
+    ReadFile(hFile, &mod, sizeof(mod), &read, NULL);
+    ReadFile(hFile, &enc, sizeof(enc), &read, NULL);
+    ReadFile(hFile, &le, sizeof(le), &read, NULL);
+
+    int len;
+    ReadFile(hFile, &len, sizeof(len), &read, NULL);
+
+    WCHAR *title = UNTITLED_NAME;
+    if (path[0]) {
+      WCHAR *p = wcsrchr(path, L'\\');
+      if (p)
+        title = p + 1;
+      else
+        title = path;
+    }
+
+    AddTab(hwnd, title, path);
+    TabData *t = &g_app.tabs[i];
+    t->encoding = enc;
+    t->lineEnding = le;
+
+    if (len > 0) {
+      WCHAR *buf =
+          (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (len * sizeof(WCHAR)) + 2);
+      if (buf) {
+        ReadFile(hFile, buf, len * sizeof(WCHAR), &read, NULL);
+        buf[len] = 0;
+        SetWindowTextW(t->hwndEdit, buf);
+        HeapFree(GetProcessHeap(), 0, buf);
+      }
+    }
+
+    t->modified = mod;
+    SendMessageW(t->hwndEdit, EM_SETMODIFY, mod, 0);
+
+    if (mod) {
+      TCITEMW tie = {0};
+      tie.mask = TCIF_TEXT;
+      WCHAR nameBuf[MAX_PATH_BUFFER + 2];
+      StringCchPrintfW(nameBuf, ARRAYSIZE(nameBuf), L"%s *", title);
+      tie.pszText = nameBuf;
+      TabCtrl_SetItem(g_app.hwndTab, i, &tie);
+    }
+  }
+
+  if (currentIdx >= 0 && currentIdx < g_app.tabCount) {
+    SwitchToTab(hwnd, currentIdx);
+  }
+
+  UpdateTitle(hwnd);
+  UpdateStatusBar(hwnd);
+  CloseHandle(hFile);
+  return TRUE;
+}
+
 static void HandleCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
   (void)lParam;
   switch (LOWORD(wParam)) {
@@ -1313,6 +1568,9 @@ static void HandleCommand(HWND hwnd, WPARAM wParam, LPARAM lParam) {
   case IDM_VIEW_LINE_NUMBERS:
     ToggleLineNumbers(hwnd, !g_app.lineNumbersVisible);
     break;
+  case IDM_VIEW_DARK_MODE:
+    ToggleDarkMode(hwnd, !g_app.darkMode);
+    break;
   case IDM_VIEW_ZOOM_IN:
     SetZoom(hwnd, g_app.zoomLevel + 10);
     break;
@@ -1374,10 +1632,17 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
                         0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)3, g_hInst, NULL);
 
     CreateTabControl(hwnd);
-    AddTab(hwnd, UNTITLED_NAME, NULL);
+
+    // Set defaults first
     ToggleStatusBar(hwnd, TRUE);
     ToggleLineNumbers(hwnd, FALSE);
     g_app.zoomLevel = 100;
+
+    // Try to restore session
+    if (!RestoreSession(hwnd)) {
+      AddTab(hwnd, UNTITLED_NAME, NULL);
+    }
+
     UpdateTitle(hwnd);
     UpdateStatusBar(hwnd);
     DragAcceptFiles(hwnd, TRUE);
@@ -1394,12 +1659,28 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
       TabCtrl_GetItem(dis->hwndItem, dis->itemID, &tie);
 
       // Draw background
-      FillRect(dis->hDC, &dis->rcItem, GetSysColorBrush(COLOR_BTNFACE));
+      if (g_app.darkMode) {
+        HBRUSH hTabBrush = CreateSolidBrush(RGB(50, 50, 50));
+        FillRect(dis->hDC, &dis->rcItem, hTabBrush);
+        DeleteObject(hTabBrush);
+      } else {
+        FillRect(dis->hDC, &dis->rcItem, GetSysColorBrush(COLOR_BTNFACE));
+      }
 
       // Draw text
       RECT rcText = dis->rcItem;
       rcText.left += 5;
       rcText.right -= 20; // Leave room for 'x'
+
+      COLORREF txtColor;
+      if (dis->itemState & ODS_SELECTED) {
+        txtColor = g_app.darkMode ? RGB(255, 255, 255) : RGB(0, 0, 0);
+      } else {
+        txtColor = g_app.darkMode ? RGB(180, 180, 180) : RGB(100, 100, 100);
+      }
+      SetTextColor(dis->hDC, txtColor);
+      SetBkMode(dis->hDC, TRANSPARENT);
+
       DrawTextW(dis->hDC, text, -1, &rcText,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -1409,12 +1690,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
       rcClose.right -= 4;
       rcClose.top += 4;
       rcClose.bottom -= 4;
-
-      if (dis->itemState & ODS_SELECTED) {
-        SetTextColor(dis->hDC, RGB(0, 0, 0));
-      } else {
-        SetTextColor(dis->hDC, RGB(100, 100, 100));
-      }
 
       DrawTextW(dis->hDC, L"x", -1, &rcClose,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -1513,15 +1788,43 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     UpdateMenuStates(hwnd);
     return 0;
   case WM_CLOSE:
+    if (SaveSession()) {
+      DestroyWindow(hwnd);
+      return 0;
+    }
     for (int i = g_app.tabCount - 1; i >= 0; i--) {
       if (!PromptSaveChanges(hwnd, i))
         return 0;
     }
     DestroyWindow(hwnd);
     return 0;
+  case WM_ERASEBKGND:
+    if (g_app.darkMode) {
+      HDC hdc = (HDC)wParam;
+      RECT rc;
+      GetClientRect(hwnd, &rc);
+      if (!g_app.hEditBrush) {
+        g_app.hEditBrush = CreateSolidBrush(RGB(30, 30, 30));
+      }
+      FillRect(hdc, &rc, g_app.hEditBrush);
+      return 1;
+    }
+    break;
   case WM_DESTROY:
     PostQuitMessage(0);
     return 0;
+  case WM_CTLCOLOREDIT: {
+    if (g_app.darkMode) {
+      HDC hdc = (HDC)wParam;
+      SetTextColor(hdc, RGB(220, 220, 220));
+      SetBkColor(hdc, RGB(30, 30, 30));
+      if (!g_app.hEditBrush) {
+        g_app.hEditBrush = CreateSolidBrush(RGB(30, 30, 30));
+      }
+      return (LRESULT)g_app.hEditBrush;
+    }
+    break;
+  }
   case WM_MOUSEWHEEL:
     if (wParam & MK_CONTROL) {
       int delta = GET_WHEEL_DELTA_WPARAM(wParam);

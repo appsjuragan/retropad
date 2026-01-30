@@ -45,6 +45,7 @@ BEGIN
     BEGIN
         MENUITEM "&Status Bar",             IDM_VIEW_STATUS_BAR, CHECKED
         MENUITEM "&Line Numbers",           IDM_VIEW_LINE_NUMBERS
+        MENUITEM "&Dark Mode",              IDM_VIEW_DARK_MODE
         POPUP "&Zoom"
         BEGIN
             MENUITEM "Zoom &In\tCtrl+Plus",     IDM_VIEW_ZOOM_IN
